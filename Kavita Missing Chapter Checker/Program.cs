@@ -17,31 +17,52 @@ namespace Kavita_Missing_Chapter_Checker
         static void Main(string[] args)
         {
             InitializeLogger("MissingChapters.log");
-            string baseUrl, apiKey, libraryId;
-            GetInfoFromUser(out baseUrl, out apiKey, out libraryId);
-
-            string kavitaToken = Authenticate(baseUrl, apiKey);
-
-            LogMessage("Missing Chapters: \n\n--------------------------\n");
-
-            var librarySeries = GetLibrarySeriesInfo(libraryId, kavitaToken, baseUrl);
-
-            foreach (var series in librarySeries)
-            {
-                AnalyzeSeries(series, kavitaToken, baseUrl);
-            }
-        }
-
-        private static void GetInfoFromUser(out string baseUrl, out string apiKey, out string libraryId)
-        {
             string odpsUrl = PromptUser("Enter the Kavita ODPS URL:");
             if (string.IsNullOrWhiteSpace(odpsUrl))
             {
                 throw new Exception("Error: ODPS URL is required.");
             }
+            var baseUrl = ExtractBaseUrl(odpsUrl);
+            var apiKey = ExtractApiKey(odpsUrl);
 
-            baseUrl = ExtractBaseUrl(odpsUrl);
-            apiKey = ExtractApiKey(odpsUrl);
+            while (true)
+            {
+                Console.Clear(); // Clear the console before each run
+
+                string libraryId;
+                try
+                {
+                    GetInfoFromUser(out libraryId);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(ex.Message);
+                    continue; // Restart the loop if input is invalid
+                }
+
+                string kavitaToken = Authenticate(baseUrl, apiKey);
+
+                LogMessage("Missing Chapters: \n\n--------------------------\n");
+
+                var librarySeries = GetLibrarySeriesInfo(libraryId, kavitaToken, baseUrl);
+
+                foreach (var series in librarySeries)
+                {
+                    AnalyzeSeries(series, kavitaToken, baseUrl);
+                }
+
+                Console.WriteLine("\nWould you like to check another library? (y/n)");
+                string response = Console.ReadLine()?.Trim().ToLower();
+                if (response != "y")
+                {
+                    break; // Exit the loop if the user doesn't want to continue
+                }
+            }
+        }
+
+        private static void GetInfoFromUser(out string libraryId)
+        {
+
             libraryId = PromptUser("Enter the Library ID:");
             if (string.IsNullOrWhiteSpace(libraryId))
             {
@@ -126,9 +147,23 @@ namespace Kavita_Missing_Chapter_Checker
 
             var seriesVolumes = GetSeriesVolumes(seriesId, kavitaToken, baseUrl);
             seriesReportBuilder.AppendLine($"Series: {seriesName}");
+            var sortedVolumes = seriesVolumes.OrderBy(e => e.Number).ToList();
 
-            foreach (var volume in seriesVolumes)
+            var volume1Chapters = seriesVolumes.FirstOrDefault(v => v.Number == 1)?.Chapters.Select(c => c.Number).ToHashSet() ?? new HashSet<decimal>();
+            bool volumesStartAtOne = true;
+            if (sortedVolumes.Count > 1)
             {
+                volumesStartAtOne = sortedVolumes[1].Chapters.Any(e => e.Number < 2);
+            }
+            foreach (var volume in sortedVolumes)
+            {
+                // Check for overlap between Volume 1 and subsequent volumes
+                if (volume.Number > 1 && volume.Chapters.Any(c => volume1Chapters.Contains(c.Number)) && !volumesStartAtOne)
+                {
+                    foundIssueInSeries = true;
+                    seriesReportBuilder.AppendLine($"Volume {volume.Number} has overlapping chapter numbers with Volume 1.");
+                }
+
                 AnalyzeVolume(volume, seriesReportBuilder, ref foundIssueInSeries);
             }
 
@@ -150,23 +185,33 @@ namespace Kavita_Missing_Chapter_Checker
             {
                 foundIssueInSeries = true;
                 seriesReportBuilder.AppendLine($"Volume: {volume.Number}");
-                AppendIssuesToReport(seriesReportBuilder, "Missing Chapters", missingChapters);
+                AppendMissingToReport(seriesReportBuilder, "Missing Chapters", missingChapters);
                 AppendIssuesToReport(seriesReportBuilder, "Duplicate Chapters", duplicateChapters);
                 AppendIssuesToReport(seriesReportBuilder, "File Name Mismatches", fileMissMatchChapters);
             }
         }
 
-        private static List<decimal> FindMissingChapters(Chapter[] chapters)
+        private static List<string> FindMissingChapters(Chapter[] chapters)
         {
-            List<decimal> missingChapters = [];
+            List<string> missingChapters = [];
             for (int i = 0; i < chapters.Length - 1; i++)
             {
                 if (chapters[i].Number + 1.1M < chapters[i + 1].Number)
                 {
-                    missingChapters.Add(Math.Floor(chapters[i].Number + 1));
+                    var firstMissingChapter = Math.Floor(chapters[i].Number + 1);
+                    var lastMissingChapter = Math.Floor(chapters[i+1].Number - 1);
+                    missingChapters.Add($"{firstMissingChapter}-{lastMissingChapter}");
                 }
             }
             return missingChapters;
+
+            IEnumerable<decimal> DecimalRange(decimal start, decimal end)
+            {
+                for (decimal value = start; value <= end; value ++)
+                {
+                    yield return value;
+                }
+            }
         }
 
         private static List<string> FindDuplicateChapters(Chapter[] chapters)
@@ -213,7 +258,7 @@ namespace Kavita_Missing_Chapter_Checker
             }
         }
 
-        private static void AppendIssuesToReport(StringBuilder reportBuilder, string issueType, IEnumerable<decimal> chapters)
+        private static void AppendMissingToReport(StringBuilder reportBuilder, string issueType, IEnumerable<string> chapters)
         {
             if (chapters.Any())
             {
